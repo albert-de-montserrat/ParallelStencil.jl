@@ -5,7 +5,7 @@ using ParallelStencil.ParallelKernel
 import ParallelStencil.ParallelKernel.AD
 import ParallelStencil.ParallelKernel: @reset_parallel_kernel, @is_initialized, SUPPORTED_PACKAGES, PKG_CUDA, PKG_AMDGPU, PKG_METAL, PKG_THREADS, PKG_POLYESTER, PKG_KERNELABSTRACTIONS, INDICES, ARRAYTYPES, FIELDTYPES, SCALARTYPES
 import ParallelStencil.ParallelKernel: @require, @prettystring, @gorgeousstring, @isgpu, @iscpu, interpolate, @select_hardware, @current_hardware, handle
-import ParallelStencil.ParallelKernel: checkargs_parallel, checkargs_parallel_indices, parallel_indices, maxsize
+import ParallelStencil.ParallelKernel: checkargs_parallel, checkargs_parallel_indices, parallel_indices, maxsize, compute_nthreads, NTHREADS_X_MAX_AMDGPU, NTHREADS_MAX
 using ParallelStencil.ParallelKernel.Exceptions
 TEST_PACKAGES = SUPPORTED_PACKAGES
 @static if PKG_CUDA in TEST_PACKAGES
@@ -218,6 +218,24 @@ eval(:(
                     @test maxsize((x=8, y=[9 9; 9 9; 9 9], z=[7 7 7; 7 7 7])) == (3, 3, 1)
                     @test maxsize((x=8, y=[9 9; 9 9; 9 9]), [7 7 7; 7 7 7]) == (3, 3, 1)
                     @test maxsize(BitstypeStruct(5, 6.0), 8, (x=[9 9; 9 9; 9 9], y=[9 9; 9 9; 9 9]), (x=[7 7 7; 7 7 7], y=[7 7 7; 7 7 7])) == (3, 3, 1)
+                end;
+                @testset "compute_nthreads" begin
+                    @test compute_nthreads(256)                                          == (32, 1, 1)
+                    @test compute_nthreads((256, 256))                                   == (32, 8, 1)
+                    @test compute_nthreads((256, 256, 256))                              == (32, 8, 1)
+                    @test compute_nthreads((256, 256, 256); nthreads_x_max=NTHREADS_X_MAX_AMDGPU) == (64, 4, 1)
+                    @test compute_nthreads((8, 8, 8))                                    == (8, 8, 4)
+                    @test compute_nthreads((256, 256, 256); nthreads_max=128, flatdim=3) == (32, 4, 1)
+                    @testset "nthreads never exceeds nthreads_max" begin # NOTE: rounding the thread budget of each dimension up used to make the total number of threads exceed nthreads_max whenever a previous dimension was clamped to a smaller maxsize, resulting in a launch failure (e.g. maxsize=(256,5,128) resulted in (32,5,2)=320 threads).
+                        @test compute_nthreads((256, 5, 128)) == (32, 5, 1)
+                        @test compute_nthreads((256, 3, 128)) == (32, 3, 2)
+                        @test compute_nthreads((10, 100, 100)) == (10, 25, 1)
+                        maxsizes = ((i, j, k) for i in 1:70, j in 1:70, k in 1:70) # NOTE: `ms` is used below instead of `maxsize` in order not to shadow the imported function `maxsize`.
+                        @test all(prod(compute_nthreads(ms)) <= NTHREADS_MAX for ms in maxsizes)
+                        @test all(prod(compute_nthreads(ms; nthreads_x_max=NTHREADS_X_MAX_AMDGPU)) <= NTHREADS_MAX for ms in maxsizes)
+                        @test all(prod(compute_nthreads(ms; nthreads_max=128, flatdim=loopdim)) <= 128 for ms in maxsizes, loopdim in 1:3)
+                        @test all(all(compute_nthreads(ms) .>= 1) for ms in maxsizes)
+                    end;
                 end;
             end;
             @static if $package != $PKG_POLYESTER # Enzyme does not support Polyester.
